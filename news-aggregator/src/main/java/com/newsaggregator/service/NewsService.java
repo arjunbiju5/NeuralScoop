@@ -1,10 +1,13 @@
-package com.newsaggregator.fetcher;
+package com.newsaggregator.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.newsaggregator.model.Article;
+import com.newsaggregator.repository.ArticleRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -12,19 +15,25 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-public class NewsFetcher {
-    private static final Logger logger = LoggerFactory.getLogger(NewsFetcher.class);
+@Service
+public class NewsService {
+    private static final Logger logger = LoggerFactory.getLogger(NewsService.class);
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
-    private final String newsApiKey;
-    private final String groqApiKey;
+    private final ArticleRepository articleRepository;
 
-    public NewsFetcher(String newsApiKey, String groqApiKey) {
+    @Value("${NEWSAPI}")
+    private String newsApiKey;
+
+    @Value("${GROQAPI}")
+    private String groqApiKey;
+
+    public NewsService(ArticleRepository articleRepository, ObjectMapper objectMapper) {
         this.httpClient = HttpClient.newHttpClient();
-        this.objectMapper = new ObjectMapper();
-        this.newsApiKey = newsApiKey;
-        this.groqApiKey = groqApiKey;
+        this.objectMapper = objectMapper;
+        this.articleRepository = articleRepository;
     }
 
     public List<Article> fetchAndSummarize(String category) {
@@ -37,11 +46,19 @@ public class NewsFetcher {
             try {
                 String summary = summarizeWithGroq(title, desc);
                 article.setAiSummary(summary);
+                article.getAiResults().put("model", "llama-3.1-8b-instant (Groq)");
                 logger.info("AI Summary: {}", summary);
             } catch (Exception e) {
                 logger.error("Error summarizing article", e);
+                article.getAiResults().put("error", "Summarization failed: " + e.getMessage());
             }
         }
+        
+        // Save to Database (Supabase)
+        if (!articles.isEmpty()) {
+            articleRepository.saveAll(articles);
+        }
+        
         return articles;
     }
 
@@ -69,6 +86,10 @@ public class NewsFetcher {
             if (articlesNode.isArray()) {
                 for (JsonNode node : articlesNode) {
                     Article article = objectMapper.treeToValue(node, Article.class);
+                    // Ensure metadata is initialized (prevent null pointer exceptions)
+                    if (article.getAiResults() == null) {
+                        article.setAiResults(new java.util.HashMap<>());
+                    }
                     articleList.add(article);
                 }
             }
@@ -83,11 +104,11 @@ public class NewsFetcher {
         String url = "https://api.groq.com/openai/v1/chat/completions";
         
         String requestBody = objectMapper.writeValueAsString(
-                java.util.Map.of(
+                Map.of(
                         "model", "llama-3.1-8b-instant",
-                        "messages", java.util.List.of(
-                                java.util.Map.of("role", "system", "content", "Summarize this news in exactly 2 short sentences."),
-                                java.util.Map.of("role", "user", "content", "Title: " + title + "\nDescription: " + description)
+                        "messages", List.of(
+                                Map.of("role", "system", "content", "Summarize this news in exactly 2 short sentences."),
+                                Map.of("role", "user", "content", "Title: " + title + "\nDescription: " + description)
                         )
                 )
         );
